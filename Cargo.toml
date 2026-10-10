@@ -1,0 +1,76 @@
+[package]
+name = "bloxy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "MITM filtering proxy with a DNS blackhole and uBlock Origin filter list support"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+bytes = "1"
+
+# HTTP proxy
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# Admin interface
+axum = "0.8"
+
+# TLS / certificate authority
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+webpki-roots = "1"
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+sha2 = "0.10"
+
+# DNS. Only the wire protocol is needed; the listeners and the forwarder are
+# small enough to own directly, which keeps the blackhole logic in one place.
+hickory-proto = "0.26"
+
+# Filter lists
+adblock = { version = "0.13", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+
+# List downloads. `rustls-no-provider` makes reqwest use the process-default
+# CryptoProvider, which main() installs as ring -- keeping one provider in the binary.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls-no-provider",
+    "webpki-roots",
+    "gzip",
+    "brotli",
+    "deflate",
+    "charset",
+    "http2",
+] }
+
+# Response decompression for cosmetic filter injection. `brotli` is pinned to
+# the major version reqwest already pulls in so only one copy is compiled, and
+# `ruzstd` is a decode-only zstd implementation that needs no C toolchain.
+flate2 = "1"
+brotli = "8"
+ruzstd = "0.9"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+rand = "0.9"
+parking_lot = "0.12"
+moka = { version = "0.12", features = ["sync"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

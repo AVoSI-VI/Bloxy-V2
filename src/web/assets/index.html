@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bloxy</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>bloxy</h1>
+      <div class="header-meta">
+        <span id="version"></span>
+        <span id="uptime"></span>
+        <span id="save-state" class="save-state"></span>
+      </div>
+    </header>
+
+    <nav id="tabs">
+      <button type="button" class="tab active" data-panel="overview">Overview</button>
+      <button type="button" class="tab" data-panel="dns">DNS blocking</button>
+      <button type="button" class="tab" data-panel="filters">Filter lists</button>
+      <button type="button" class="tab" data-panel="proxy">Proxy &amp; CA</button>
+      <button type="button" class="tab" data-panel="events">Blocked events</button>
+    </nav>
+
+    <main>
+      <!-- ---------------------------------------------------- Overview -->
+      <section id="overview" class="panel active">
+        <div class="cards">
+          <div class="card">
+            <span class="card-label">DNS queries</span>
+            <span class="card-value" id="stat-dns-queries">0</span>
+          </div>
+          <div class="card">
+            <span class="card-label">DNS blocked</span>
+            <span class="card-value" id="stat-dns-blocked">0</span>
+            <span class="card-sub" id="stat-dns-rate"></span>
+          </div>
+          <div class="card">
+            <span class="card-label">HTTP requests</span>
+            <span class="card-value" id="stat-http-requests">0</span>
+          </div>
+          <div class="card">
+            <span class="card-label">HTTP blocked</span>
+            <span class="card-value" id="stat-http-blocked">0</span>
+            <span class="card-sub" id="stat-http-rate"></span>
+          </div>
+        </div>
+
+        <h2>Loaded data</h2>
+        <dl class="facts">
+          <dt>Blocked domains</dt>
+          <dd id="fact-blocked-domains">&ndash;</dd>
+          <dt>Allowed domains</dt>
+          <dd id="fact-allowed-domains">&ndash;</dd>
+          <dt>Filter list sources</dt>
+          <dd id="fact-filter-sources">&ndash;</dd>
+          <dt>Certificates minted</dt>
+          <dd id="fact-ca-hosts">&ndash;</dd>
+        </dl>
+
+        <h2>Services</h2>
+        <dl class="facts">
+          <dt>Proxy</dt>
+          <dd id="fact-proxy">&ndash;</dd>
+          <dt>DNS</dt>
+          <dd id="fact-dns">&ndash;</dd>
+          <dt>Admin</dt>
+          <dd id="fact-admin">&ndash;</dd>
+        </dl>
+
+        <div class="actions">
+          <button type="button" id="refresh-lists">Update all lists now</button>
+          <button type="button" id="reload-engines" class="secondary">
+            Reload from cache
+          </button>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------------------- DNS -->
+      <section id="dns" class="panel">
+        <h2>DNS server</h2>
+        <div class="field">
+          <label for="dns-enabled">
+            <input type="checkbox" id="dns-enabled" data-config="dns.enabled" />
+            Run the DNS server
+          </label>
+          <p class="hint">Takes effect after a restart.</p>
+        </div>
+        <div class="field">
+          <label for="dns-listen">Listen address</label>
+          <input type="text" id="dns-listen" data-config="dns.listen" />
+          <p class="hint">
+            Port 53 is the standard DNS port and usually needs elevated
+            privileges. Takes effect after a restart.
+          </p>
+        </div>
+        <div class="field">
+          <label for="dns-upstreams">Upstream resolvers</label>
+          <textarea id="dns-upstreams" rows="3" data-config="dns.upstreams"></textarea>
+          <p class="hint">One <code>address:port</code> per line, tried in order.</p>
+        </div>
+        <div class="field">
+          <label for="dns-response">Answer for blocked names</label>
+          <select id="dns-response" data-config="dns.block_response">
+            <option value="null-address">0.0.0.0 / :: (fails fast)</option>
+            <option value="nx-domain">NXDOMAIN</option>
+            <option value="refused">REFUSED</option>
+          </select>
+        </div>
+
+        <h2>Individually blocked domains</h2>
+        <p class="hint">Blocking a domain also blocks all of its subdomains.</p>
+        <form class="inline-form" id="add-blocked">
+          <input type="text" id="add-blocked-input" placeholder="ads.example.com" />
+          <button type="submit">Block</button>
+        </form>
+        <ul class="domain-list" id="blocked-domains"></ul>
+
+        <h2>Allowed domains</h2>
+        <p class="hint">
+          Overrides both blocklists and the individual blocks above.
+        </p>
+        <form class="inline-form" id="add-allowed">
+          <input type="text" id="add-allowed-input" placeholder="cdn.example.com" />
+          <button type="submit">Allow</button>
+        </form>
+        <ul class="domain-list" id="allowed-domains"></ul>
+
+        <h2>Blocklists</h2>
+        <p class="hint">
+          Hosts files or plain domain lists. These feed the DNS blackhole.
+        </p>
+        <table class="list-table">
+          <thead>
+            <tr>
+              <th>On</th>
+              <th>Name</th>
+              <th>URL</th>
+              <th>Size</th>
+              <th>Updated</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="dns-lists"></tbody>
+        </table>
+        <form class="inline-form" id="add-dns-list">
+          <input type="text" id="add-dns-list-name" placeholder="List name" />
+          <input type="url" id="add-dns-list-url" placeholder="https://..." />
+          <button type="submit">Add list</button>
+        </form>
+      </section>
+
+      <!-- ----------------------------------------------------- Filters -->
+      <section id="filters" class="panel">
+        <h2>Web content filtering</h2>
+        <div class="field">
+          <label for="filtering-enabled">
+            <input
+              type="checkbox"
+              id="filtering-enabled"
+              data-config="filtering.enabled"
+            />
+            Filter web traffic with uBlock Origin filter lists
+          </label>
+        </div>
+        <div class="field">
+          <label for="cosmetic-enabled">
+            <input
+              type="checkbox"
+              id="cosmetic-enabled"
+              data-config="filtering.cosmetic_filtering"
+            />
+            Apply cosmetic filters (element hiding)
+          </label>
+          <p class="hint">
+            Requires interception. HTML pages are buffered and rewritten, and
+            their requests ask for gzip rather than brotli.
+          </p>
+        </div>
+
+        <h2>Filter lists</h2>
+        <p class="hint">uBlock Origin / Adblock Plus syntax.</p>
+        <table class="list-table">
+          <thead>
+            <tr>
+              <th>On</th>
+              <th>Name</th>
+              <th>URL</th>
+              <th>Size</th>
+              <th>Updated</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="filter-lists"></tbody>
+        </table>
+        <form class="inline-form" id="add-filter-list">
+          <input type="text" id="add-filter-list-name" placeholder="List name" />
+          <input type="url" id="add-filter-list-url" placeholder="https://..." />
+          <button type="submit">Add list</button>
+        </form>
+
+        <h2>Custom rules</h2>
+        <div class="field">
+          <textarea
+            id="custom-rules"
+            rows="10"
+            spellcheck="false"
+            data-config="filtering.custom_rules"
+            placeholder="||tracker.example^&#10;example.com##.ad-banner"
+          ></textarea>
+          <p class="hint">One rule per line.</p>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------- Proxy &amp; CA -->
+      <section id="proxy" class="panel">
+        <h2>Proxy</h2>
+        <div class="field">
+          <label for="proxy-enabled">
+            <input type="checkbox" id="proxy-enabled" data-config="proxy.enabled" />
+            Run the proxy
+          </label>
+          <p class="hint">Takes effect after a restart.</p>
+        </div>
+        <div class="field">
+          <label for="proxy-listen">Listen address</label>
+          <input type="text" id="proxy-listen" data-config="proxy.listen" />
+          <p class="hint">Takes effect after a restart.</p>
+        </div>
+        <div class="field">
+          <label for="mitm-enabled">
+            <input type="checkbox" id="mitm-enabled" data-config="proxy.mitm_enabled" />
+            Intercept HTTPS
+          </label>
+          <p class="hint">
+            When off, HTTPS is tunnelled untouched and only whole domains can be
+            blocked.
+          </p>
+        </div>
+        <div class="field">
+          <label for="mitm-bypass">Never intercept these hosts</label>
+          <textarea
+            id="mitm-bypass"
+            rows="5"
+            spellcheck="false"
+            data-config="proxy.mitm_bypass"
+            placeholder="bank.example&#10;pinned-app.example"
+          ></textarea>
+          <p class="hint">
+            One host per line; subdomains are included. Use this for apps that
+            pin certificates.
+          </p>
+        </div>
+
+        <h2>Certificate authority</h2>
+        <p class="hint">
+          Interception only works once this certificate is installed as a
+          trusted root on the client. Verify the fingerprint after installing.
+        </p>
+        <dl class="facts">
+          <dt>SHA-256</dt>
+          <dd><code id="ca-fingerprint" class="fingerprint">&ndash;</code></dd>
+        </dl>
+        <div class="actions">
+          <a class="button" href="/ca.crt" download>Download CA certificate</a>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------------ Events -->
+      <section id="events" class="panel">
+        <h2>Recently blocked</h2>
+        <div class="actions">
+          <label class="inline-check">
+            <input type="checkbox" id="events-autorefresh" checked />
+            Auto-refresh
+          </label>
+          <button type="button" id="clear-events" class="secondary">Clear</button>
+        </div>
+        <table class="list-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Source</th>
+              <th>Client</th>
+              <th>Target</th>
+              <th>Rule</th>
+            </tr>
+          </thead>
+          <tbody id="events-body"></tbody>
+        </table>
+        <p class="hint" id="events-empty">Nothing blocked yet.</p>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,3 @@
+/target
+# Runtime state: config, the generated CA private key, and the list cache.
+/data
