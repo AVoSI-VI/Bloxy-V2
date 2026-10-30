@@ -41,16 +41,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check tag matches Cargo.toml version
-        shell: bash
-        run: |
-          pkg_version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
-          tag_version="${GITHUB_REF_NAME#v}"
-          if [ "$pkg_version" != "$tag_version" ]; then
-            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${pkg_version}"
-            exit 1
-          fi
-
       - name: Test
         run: cargo test --locked --target ${{ matrix.target }}
 
@@ -83,6 +73,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -97,7 +89,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          pkg_version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          tag="v${pkg_version}"
           shopt -s nullglob
           files=(artifacts/*)
           if [ "${#files[@]}" -eq 0 ]; then
@@ -107,5 +100,5 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "${files[@]}" --clobber
           else
-            gh release create "$tag" "${files[@]}" --generate-notes
+            gh release create "$tag" "${files[@]}" --target "${GITHUB_SHA}" --generate-notes
           fi
