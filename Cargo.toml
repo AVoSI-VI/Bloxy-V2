@@ -67,6 +67,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 clap = { version = "4", features = ["derive"] }
 
+# Admin authentication. The password is Argon2id; the API token is compared
+# in constant time. `rpassword` reads the bootstrap password without echo.
+argon2 = "0.5"
+# `OsRng` lives on the `rand_core` that `argon2` re-exports, and that crate
+# only exposes it with the `getrandom` feature, which argon2 does not forward.
+password-hash = { version = "0.5", features = ["getrandom"] }
+subtle = "2"
+rpassword = "7"
+
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

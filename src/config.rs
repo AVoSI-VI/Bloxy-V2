@@ -143,12 +143,29 @@ impl Default for FilteringConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
     pub listen: SocketAddr,
+    /// When false, the admin interface accepts every request. Default on.
+    ///
+    /// This default has to be field-level. `#[serde(default)]` on the struct
+    /// fills a missing field from the field type, and `bool` defaults to
+    /// `false`, so a `config.json` that already has an `admin` object would
+    /// otherwise turn authentication off.
+    #[serde(default = "default_true")]
+    pub auth_required: bool,
+    /// Terminate TLS on the admin listener with a certificate from the local CA.
+    #[serde(default)]
+    pub tls_enabled: bool,
+    /// Name on that certificate. When unset, the listen address's IP is used.
+    #[serde(default)]
+    pub tls_hostname: Option<String>,
 }
 
 impl Default for AdminConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:8081".parse().unwrap(),
+            auth_required: true,
+            tls_enabled: false,
+            tls_hostname: None,
         }
     }
 }
@@ -222,9 +239,6 @@ impl Paths {
 
     /// Password hash and API token hash. Kept out of `config.json` because
     /// that file is returned by the admin API and edited whole by the UI.
-    ///
-    /// Nothing reads this until the credentials file lands.
-    #[allow(dead_code)]
     pub fn admin_auth(&self) -> PathBuf {
         self.root.join("admin-auth.json")
     }
@@ -297,6 +311,21 @@ mod tests {
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.proxy.listen, Config::default().proxy.listen);
         assert!(loaded.filtering.enabled);
+        assert!(loaded.admin.auth_required);
+        assert!(!loaded.admin.tls_enabled);
+        assert!(loaded.admin.tls_hostname.is_none());
+    }
+
+    #[test]
+    fn admin_defaults_hold_when_the_section_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{\"admin\":{\"listen\":\"127.0.0.1:8081\"}}").unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+        assert!(loaded.admin.auth_required);
+        assert!(!loaded.admin.tls_enabled);
+        assert!(loaded.admin.tls_hostname.is_none());
     }
 
     #[test]
