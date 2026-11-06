@@ -38,6 +38,19 @@ pub struct ListStatuses {
 
 impl AppState {
     pub async fn new(paths: Paths) -> Result<Arc<Self>> {
+        let state = Self::create(paths)?;
+        state.reload().await;
+        Ok(state)
+    }
+
+    /// Like [`new`](Self::new), but skips the engine rebuild. Router tests use
+    /// this so they do not compile filter lists.
+    #[cfg(test)]
+    pub fn for_tests(paths: Paths) -> Result<Arc<Self>> {
+        Self::create(paths)
+    }
+
+    fn create(paths: Paths) -> Result<Arc<Self>> {
         paths.ensure()?;
 
         let config = Config::load_or_create(&paths.config())?;
@@ -46,7 +59,7 @@ impl AppState {
             &paths.ca_key(),
         )?);
 
-        let state = Arc::new(Self {
+        Ok(Arc::new(Self {
             list_status: RwLock::new(ListStatuses {
                 dns: lists::statuses(&paths, &config.dns.blocklists),
                 filters: lists::statuses(&paths, &config.filtering.lists),
@@ -59,10 +72,7 @@ impl AppState {
             stats: Stats::new(),
             http: lists::client(),
             started: OffsetDateTime::now_utc(),
-        });
-
-        state.reload().await;
-        Ok(state)
+        }))
     }
 
     pub fn config(&self) -> Config {

@@ -93,13 +93,17 @@ impl CertAuthority {
     }
 
     /// Lowercase hex SHA-256 of the CA certificate, so the user can verify what
-    /// they installed.
+    /// they installed. Colon-separated pairs; the admin UI shows this as-is.
     pub fn fingerprint(&self) -> String {
-        sha256(self.ca_der.as_ref())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<Vec<_>>()
-            .join(":")
+        let digits = hex(&sha256(self.ca_der.as_ref()));
+        let mut formatted = String::with_capacity(digits.len() + digits.len() / 2);
+        for (index, digit) in digits.chars().enumerate() {
+            if index > 0 && index % 2 == 0 {
+                formatted.push(':');
+            }
+            formatted.push(digit);
+        }
+        formatted
     }
 
     pub fn cached_hosts(&self) -> u64 {
@@ -214,9 +218,14 @@ fn pem_to_der(pem: &str) -> Result<CertificateDer<'static>> {
     Ok(first)
 }
 
-fn sha256(data: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     sha2::Sha256::digest(data).into()
+}
+
+/// Lowercase hex with no separators.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -236,6 +245,16 @@ mod tests {
         let second = test_ca(dir.path());
         assert_eq!(first.ca_pem(), second.ca_pem());
         assert_eq!(first.fingerprint(), second.fingerprint());
+
+        let fingerprint = first.fingerprint();
+        let parts: Vec<_> = fingerprint.split(':').collect();
+        assert_eq!(parts.len(), 32);
+        assert!(parts.iter().all(|part| {
+            part.len() == 2
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        }));
     }
 
     #[test]
@@ -246,6 +265,11 @@ mod tests {
 
         assert!(ca.server_config_for("example.com").is_ok());
         assert!(ca.server_config_for("127.0.0.1").is_ok());
+    }
+
+    #[test]
+    fn hex_is_lowercase_and_has_no_separators() {
+        assert_eq!(hex(&[0x00, 0x0a, 0xff]), "000aff");
     }
 
     #[test]

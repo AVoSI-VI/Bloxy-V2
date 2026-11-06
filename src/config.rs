@@ -166,6 +166,18 @@ fn default_true() -> bool {
     true
 }
 
+/// Writes pretty-printed JSON via a sibling temporary file, then renames it
+/// into place. A crash mid-write leaves the previous file intact.
+pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing config {}", path.display()))?;
+    Ok(())
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
@@ -179,14 +191,7 @@ impl Config {
     /// Writes via a temporary file so a crash mid-write cannot truncate the
     /// existing config.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("writing config {}", path.display()))?;
-        Ok(())
+        write_json_atomic(path, self)
     }
 
     pub fn load_or_create(path: &Path) -> Result<Self> {
@@ -213,6 +218,15 @@ impl Paths {
 
     pub fn config(&self) -> PathBuf {
         self.root.join("config.json")
+    }
+
+    /// Password hash and API token hash. Kept out of `config.json` because
+    /// that file is returned by the admin API and edited whole by the UI.
+    ///
+    /// Nothing reads this until the credentials file lands.
+    #[allow(dead_code)]
+    pub fn admin_auth(&self) -> PathBuf {
+        self.root.join("admin-auth.json")
     }
 
     pub fn ca_cert(&self) -> PathBuf {
@@ -304,6 +318,15 @@ mod tests {
         assert_ne!(
             paths.cached_list("https://a.example/list.txt"),
             paths.cached_list("https://b.example/list.txt")
+        );
+    }
+
+    #[test]
+    fn admin_auth_lives_next_to_the_config() {
+        let paths = Paths::new(PathBuf::from("data"));
+        assert_eq!(
+            paths.admin_auth(),
+            PathBuf::from("data").join("admin-auth.json")
         );
     }
 }
