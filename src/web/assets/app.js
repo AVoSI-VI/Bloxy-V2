@@ -6,6 +6,9 @@ let config = null;
 let statusTimer = null;
 let eventsTimer = null;
 let saveTimer = null;
+// A status poll must not replace `config` while an edit is waiting to be saved.
+let configRevision = 0;
+let savedRevision = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -21,6 +24,9 @@ async function api(path, options) {
     } catch (_) {
       /* the body was not JSON; the status text will do */
     }
+    // A wrong password is also a 401, and that session is still valid.
+    // Only a missing session should cover the page with the login overlay.
+    if (response.status === 401 && detail !== "invalid credentials") showLogin();
     throw new Error(detail);
   }
   return response.status === 204 ? null : response.json();
@@ -79,10 +85,12 @@ function setSaveState(text, className) {
 /** Sends the whole config, debounced so rapid edits cause one rebuild. */
 function saveConfig({ immediate = false } = {}) {
   clearTimeout(saveTimer);
+  const revision = ++configRevision;
   const delay = immediate ? 0 : 500;
 
   return new Promise((resolve) => {
     saveTimer = setTimeout(async () => {
+      saveTimer = null;
       setSaveState("Saving\u2026", "saving");
       try {
         const result = await api("/api/config", {
@@ -90,6 +98,7 @@ function saveConfig({ immediate = false } = {}) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(config),
         });
+        if (configRevision === revision) savedRevision = revision;
         setSaveState(result.restart_required ? "Saved (restart needed)" : "Saved", "saved");
         await refreshStatus();
       } catch (error) {
@@ -117,7 +126,9 @@ function collectAndSave() {
         .filter((line) => line.length > 0);
       setPath(config, path, lines);
     } else {
-      setPath(config, path, element.value.trim());
+      const text = element.value.trim();
+      // An empty hostname means unset, so the listener's IP is used.
+      setPath(config, path, path === "admin.tls_hostname" && text === "" ? null : text);
     }
   }
 
@@ -152,7 +163,10 @@ async function refreshStatus() {
     return;
   }
 
-  config = status.config;
+  // Dropping an edit here was how a checkbox could say "Saved" and not stick.
+  if (saveTimer == null && configRevision === savedRevision) {
+    config = status.config;
+  }
 
   $("version").textContent = `v${status.version}`;
   $("uptime").textContent = formatDuration(status.uptime_seconds);
@@ -184,6 +198,12 @@ async function refreshStatus() {
   renderDomains();
   renderLists("dns-lists", status.dns_lists, "dns");
   renderLists("filter-lists", status.filter_lists, "filtering");
+
+  try {
+    await checkAuth();
+  } catch (_) {
+    /* the banner can catch up on the next poll */
+  }
 }
 
 // ------------------------------------------------------------------ actions
@@ -257,6 +277,23 @@ function wireActions() {
   });
 }
 
+function stopPolling() {
+  clearInterval(statusTimer);
+  clearInterval(eventsTimer);
+  statusTimer = null;
+  eventsTimer = null;
+}
+
+/** Status and events. Runs once the gate is open, or when authentication is off. */
+async function loadInterface() {
+  const state = await checkAuth();
+  if (state.auth_required && !state.authenticated) return;
+  await refreshStatus();
+  await refreshEvents();
+  if (statusTimer == null) statusTimer = setInterval(refreshStatus, 5000);
+  if (eventsTimer == null) eventsTimer = setInterval(refreshEvents, 3000);
+}
+
 async function init() {
   wireTabs();
   wireConfigFields();
@@ -264,12 +301,8 @@ async function init() {
   wireActions();
   wireAddList("add-dns-list", "add-dns-list-name", "add-dns-list-url", "dns");
   wireAddList("add-filter-list", "add-filter-list-name", "add-filter-list-url", "filtering");
-
-  await refreshStatus();
-  await refreshEvents();
-
-  statusTimer = setInterval(refreshStatus, 5000);
-  eventsTimer = setInterval(refreshEvents, 3000);
+  wireAuth();
+  await loadInterface();
 }
 
 document.addEventListener("DOMContentLoaded", init);

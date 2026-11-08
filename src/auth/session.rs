@@ -85,10 +85,6 @@ impl Store {
     }
 
     /// Password changes keep the caller's session and drop the rest.
-    ///
-    /// The password-change handler is the caller. Until that lands, only the
-    /// tests use it.
-    #[allow(dead_code)]
     pub fn clear_except(&self, keep: &str) {
         self.inner.lock().retain(|token, _| token == keep);
     }

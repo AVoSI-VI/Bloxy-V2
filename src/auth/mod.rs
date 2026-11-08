@@ -57,9 +57,6 @@ impl Credentials {
 
 /// Password hash, API token hash, and the in-memory session and lockout state.
 pub struct AuthState {
-    /// Kept so `set_credentials` can write the file. Phase 3 is the first
-    /// caller outside the tests, so a non-test build does not read it yet.
-    #[allow(dead_code)]
     paths: Paths,
     credentials: RwLock<Credentials>,
     pub sessions: session::Store,
@@ -82,10 +79,6 @@ impl AuthState {
 
     /// Writes the file, then swaps the in-memory copy. A failed write leaves
     /// the previous credentials in place.
-    ///
-    /// The password and token handlers are the callers. Until those land,
-    /// only the tests use it.
-    #[allow(dead_code)]
     pub fn set_credentials(&self, credentials: Credentials) -> Result<()> {
         credentials.save(&self.paths)?;
         *self.credentials.write() = credentials;

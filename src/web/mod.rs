@@ -21,6 +21,7 @@ use crate::state::AppState;
 const INDEX_HTML: &str = include_str!("assets/index.html");
 const APP_JS: &str = include_str!("assets/app.js");
 const PANELS_JS: &str = include_str!("assets/panels.js");
+const AUTH_JS: &str = include_str!("assets/auth.js");
 const STYLE_CSS: &str = include_str!("assets/style.css");
 
 pub async fn serve(state: Arc<AppState>) -> Result<()> {
@@ -50,6 +51,11 @@ pub async fn serve(state: Arc<AppState>) -> Result<()> {
 fn router(state: Arc<AppState>) -> Router {
     let session_only = Router::new()
         .route("/api/auth/logout", post(auth_api::logout))
+        .route("/api/auth/password", post(auth_api::change_password))
+        .route(
+            "/api/auth/token",
+            post(auth_api::create_token).delete(auth_api::revoke_token),
+        )
         .route_layer(middleware::from_fn(guard::require_session));
 
     let protected = Router::new()
@@ -69,6 +75,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/panels.js", get(panels_js))
+        .route("/auth.js", get(auth_js))
         .route("/style.css", get(style_css))
         .route("/ca.crt", get(ca_certificate))
         .route("/api/auth/state", get(auth_api::auth_state))
@@ -89,6 +96,10 @@ async fn app_js() -> impl IntoResponse {
 
 async fn panels_js() -> impl IntoResponse {
     asset("application/javascript; charset=utf-8", PANELS_JS)
+}
+
+async fn auth_js() -> impl IntoResponse {
+    asset("application/javascript; charset=utf-8", AUTH_JS)
 }
 
 async fn style_css() -> impl IntoResponse {
