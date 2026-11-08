@@ -203,6 +203,7 @@ h2 {
 
 input[type="text"],
 input[type="url"],
+input[type="password"],
 select,
 textarea {
   width: 100%;
@@ -360,4 +361,48 @@ button.link {
   border: 1px solid var(--border);
   border-radius: 999px;
   font-size: 13px;
+}
+
+/* ---------------------------------------------------------------- auth */
+
+.hidden {
+  display: none !important;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(20, 22, 26, 0.88);
+}
+
+.overlay .card {
+  width: min(400px, 100%);
+}
+
+.overlay h2 {
+  margin-top: 0;
+}
+
+.banner {
+  padding: 10px 24px;
+  background: #3d2e12;
+  color: #f0c36a;
+  border-bottom: 1px solid var(--border);
+}
+
+.token-once {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.token-once input {
+  flex: 1;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
 }

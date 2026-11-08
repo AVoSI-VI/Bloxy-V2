@@ -1,51 +1,70 @@
 //! The administration interface: a small JSON API plus the static assets that
 //! drive it.
 
+mod api;
+mod auth_api;
+mod guard;
+mod serve;
+
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
+use anyhow::Result;
+use axum::extract::State;
+use axum::http::header;
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use axum::Router;
 
-use crate::config::Config;
-use crate::lists::ListStatus;
 use crate::state::AppState;
 
 const INDEX_HTML: &str = include_str!("assets/index.html");
 const APP_JS: &str = include_str!("assets/app.js");
+const PANELS_JS: &str = include_str!("assets/panels.js");
+const AUTH_JS: &str = include_str!("assets/auth.js");
 const STYLE_CSS: &str = include_str!("assets/style.css");
 
 pub async fn serve(state: Arc<AppState>) -> Result<()> {
-    let listen = state.config().admin.listen;
+    let app = router(state.clone());
+    serve::run(state, app).await
+}
 
-    let app = Router::new()
+/// Assets, the CA certificate, and login stay outside the gate. `route_layer`
+/// (not `layer`) leaves an unknown path as 404 instead of 401.
+fn router(state: Arc<AppState>) -> Router {
+    let session_only = Router::new()
+        .route("/api/auth/logout", post(auth_api::logout))
+        .route("/api/auth/password", post(auth_api::change_password))
+        .route(
+            "/api/auth/token",
+            post(auth_api::create_token).delete(auth_api::revoke_token),
+        )
+        .route_layer(middleware::from_fn(guard::require_session));
+
+    let protected = Router::new()
+        .route("/api/status", get(api::status))
+        .route("/api/config", get(api::get_config).put(api::put_config))
+        .route("/api/reload", post(api::reload))
+        .route("/api/lists/refresh", post(api::refresh_lists))
+        .route("/api/events", get(api::events).delete(api::clear_events))
+        .route("/api/domains", post(api::edit_domain))
+        .merge(session_only)
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            guard::require_auth,
+        ));
+
+    Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/panels.js", get(panels_js))
+        .route("/auth.js", get(auth_js))
         .route("/style.css", get(style_css))
         .route("/ca.crt", get(ca_certificate))
-        .route("/api/status", get(status))
-        .route("/api/config", get(get_config).put(put_config))
-        .route("/api/reload", post(reload))
-        .route("/api/lists/refresh", post(refresh_lists))
-        .route("/api/events", get(events).delete(clear_events))
-        .route("/api/domains", post(edit_domain))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("binding admin interface on {listen}"))?;
-
-    tracing::info!(address = %listen, "admin interface listening at http://{listen}");
-
-    axum::serve(listener, app)
-        .await
-        .context("serving the admin interface")?;
-    Ok(())
+        .route("/api/auth/state", get(auth_api::auth_state))
+        .route("/api/auth/login", post(auth_api::login))
+        .merge(protected)
+        .with_state(state)
 }
 
 // ------------------------------------------------------------ static assets
@@ -56,6 +75,14 @@ async fn index() -> impl IntoResponse {
 
 async fn app_js() -> impl IntoResponse {
     asset("application/javascript; charset=utf-8", APP_JS)
+}
+
+async fn panels_js() -> impl IntoResponse {
+    asset("application/javascript; charset=utf-8", PANELS_JS)
+}
+
+async fn auth_js() -> impl IntoResponse {
+    asset("application/javascript; charset=utf-8", AUTH_JS)
 }
 
 async fn style_css() -> impl IntoResponse {
@@ -79,195 +106,274 @@ async fn ca_certificate(State(state): State<Arc<AppState>>) -> impl IntoResponse
     )
 }
 
-// ---------------------------------------------------------------- API types
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
 
-#[derive(Debug, Serialize)]
-struct Status {
-    version: &'static str,
-    uptime_seconds: i64,
-    counters: crate::stats::Counters,
-    blocked_domains: usize,
-    allowed_domains: usize,
-    filter_sources: Vec<String>,
-    dns_lists: Vec<ListStatus>,
-    filter_lists: Vec<ListStatus>,
-    ca_fingerprint: String,
-    ca_cached_hosts: u64,
-    config: Config,
-}
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
 
-async fn status(State(state): State<Arc<AppState>>) -> Json<Status> {
-    let domains = state.domains();
-    let filter = state.filter();
-    let lists = state.list_status();
+    use crate::config::{Config, Paths};
+    use crate::state::AppState;
 
-    Json(Status {
-        version: env!("CARGO_PKG_VERSION"),
-        uptime_seconds: (time::OffsetDateTime::now_utc() - state.started).whole_seconds(),
-        counters: state.stats.snapshot(),
-        blocked_domains: domains.blocked_count(),
-        allowed_domains: domains.allowed_count(),
-        filter_sources: filter.sources.clone(),
-        dns_lists: lists.dns,
-        filter_lists: lists.filters,
-        ca_fingerprint: state.ca.fingerprint(),
-        ca_cached_hosts: state.ca.cached_hosts(),
-        config: state.config(),
-    })
-}
+    const PASSWORD: &str = "long-enough";
 
-async fn get_config(State(state): State<Arc<AppState>>) -> Json<Config> {
-    Json(state.config())
-}
-
-#[derive(Debug, Serialize)]
-struct ConfigSaved {
-    ok: bool,
-    /// Listener addresses are bound at startup, so changing one needs a
-    /// restart before it takes effect.
-    restart_required: bool,
-}
-
-async fn put_config(
-    State(state): State<Arc<AppState>>,
-    Json(config): Json<Config>,
-) -> Result<Json<ConfigSaved>, ApiError> {
-    let previous = state.config();
-    let restart_required = previous.proxy.listen != config.proxy.listen
-        || previous.dns.listen != config.dns.listen
-        || previous.admin.listen != config.admin.listen
-        || previous.proxy.enabled != config.proxy.enabled
-        || previous.dns.enabled != config.dns.enabled;
-
-    state.set_config(config).await?;
-
-    Ok(Json(ConfigSaved {
-        ok: true,
-        restart_required,
-    }))
-}
-
-async fn reload(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.reload().await;
-    Json(json!({ "ok": true }))
-}
-
-async fn refresh_lists(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.refresh_lists().await;
-    let lists = state.list_status();
-    Json(json!({
-        "ok": true,
-        "dns_lists": lists.dns,
-        "filter_lists": lists.filters,
-    }))
-}
-
-#[derive(Debug, Deserialize)]
-struct EventQuery {
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
-
-fn default_limit() -> usize {
-    200
-}
-
-async fn events(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<EventQuery>,
-) -> impl IntoResponse {
-    Json(state.stats.recent(query.limit.min(2000)))
-}
-
-async fn clear_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.stats.clear();
-    Json(json!({ "ok": true }))
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum DomainList {
-    Blocked,
-    Allowed,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum DomainAction {
-    Add,
-    Remove,
-}
-
-#[derive(Debug, Deserialize)]
-struct DomainEdit {
-    list: DomainList,
-    action: DomainAction,
-    domain: String,
-}
-
-/// Adds or removes a single domain. Kept separate from the whole-config PUT so
-/// the common case does not have to round-trip every setting.
-async fn edit_domain(
-    State(state): State<Arc<AppState>>,
-    Json(edit): Json<DomainEdit>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let domain = edit
-        .domain
-        .trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
-    if domain.is_empty() {
-        return Err(ApiError::bad_request("domain must not be empty"));
+    fn router_with(setup: impl FnOnce(&Paths)) -> (tempfile::TempDir, axum::Router) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        setup(&paths);
+        let state = AppState::for_tests(paths).unwrap();
+        (dir, super::router(state))
     }
 
-    let mut config = state.config();
-    let target = match edit.list {
-        DomainList::Blocked => &mut config.dns.blocked_domains,
-        DomainList::Allowed => &mut config.dns.allowed_domains,
-    };
-
-    match edit.action {
-        DomainAction::Add => {
-            if !target.contains(&domain) {
-                target.push(domain.clone());
-                target.sort();
-            }
-        }
-        DomainAction::Remove => target.retain(|existing| existing != &domain),
+    fn with_peer(request: Request<Body>) -> Request<Body> {
+        let mut request = request;
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 10], 40000))));
+        request
     }
 
-    state.set_config(config).await?;
-    Ok(Json(json!({ "ok": true, "domain": domain })))
-}
-
-// --------------------------------------------------------------- error type
-
-struct ApiError {
-    status: StatusCode,
-    message: String,
-}
-
-impl ApiError {
-    fn bad_request(message: &str) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            message: message.to_string(),
-        }
+    fn get(uri: &str) -> Request<Body> {
+        with_peer(Request::builder().uri(uri).body(Body::empty()).unwrap())
     }
-}
 
-impl From<anyhow::Error> for ApiError {
-    fn from(error: anyhow::Error) -> Self {
-        tracing::warn!(%error, "admin request failed");
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
-        }
+    fn post_json(uri: &str, body: &str) -> Request<Body> {
+        with_peer(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
     }
-}
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+    fn with_header(
+        mut request: Request<Body>,
+        name: header::HeaderName,
+        value: &str,
+    ) -> Request<Body> {
+        request.headers_mut().insert(name, value.parse().unwrap());
+        request
+    }
+
+    async fn text(response: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn session_and_bearer_token_pass_the_gate() {
+        let mut api_token = String::new();
+        let (_dir, app) = router_with(|paths| {
+            crate::auth::cli::store_password(paths, PASSWORD).unwrap();
+            api_token = crate::auth::cli::store_new_token(paths).unwrap();
+        });
+
+        let page = app.clone().oneshot(get("/")).await.unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        let ca = app.clone().oneshot(get("/ca.crt")).await.unwrap();
+        assert_eq!(ca.status(), StatusCode::OK);
+
+        let status = app.clone().oneshot(get("/api/status")).await.unwrap();
+        assert_eq!(status.status(), StatusCode::UNAUTHORIZED);
+        assert!(text(status).await.contains("authentication required"));
+
+        let missing = app
+            .clone()
+            .oneshot(get("/api/does-not-exist"))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let state = app.clone().oneshot(get("/api/auth/state")).await.unwrap();
+        assert_eq!(state.status(), StatusCode::OK);
+        let state_body = text(state).await;
+        assert!(state_body.contains("\"password_set\":true"));
+        assert!(state_body.contains("\"authenticated\":false"));
+
+        let wrong = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                r#"{"password":"not-the-password"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+        let login = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &format!(r#"{{"password":"{PASSWORD}"}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::NO_CONTENT);
+        let set_cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(set_cookie.starts_with("bloxy_session="));
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Strict"));
+        assert!(!set_cookie.contains("Secure"));
+        let cookie = set_cookie.split(';').next().unwrap().to_string();
+
+        let authed = app
+            .clone()
+            .oneshot(with_header(get("/api/status"), header::COOKIE, &cookie))
+            .await
+            .unwrap();
+        assert_eq!(authed.status(), StatusCode::OK);
+
+        let bearer_logout = app
+            .clone()
+            .oneshot(with_header(
+                post_json("/api/auth/logout", ""),
+                header::AUTHORIZATION,
+                &format!("Bearer {api_token}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bearer_logout.status(), StatusCode::FORBIDDEN);
+
+        let bearer = app
+            .clone()
+            .oneshot(with_header(
+                get("/api/status"),
+                header::AUTHORIZATION,
+                &format!("Bearer {api_token}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bearer.status(), StatusCode::OK);
+
+        let wrong_token = app
+            .clone()
+            .oneshot(with_header(
+                get("/api/status"),
+                header::AUTHORIZATION,
+                "Bearer bloxy_wrong",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong_token.status(), StatusCode::UNAUTHORIZED);
+
+        let logout = app
+            .clone()
+            .oneshot(with_header(
+                post_json("/api/auth/logout", ""),
+                header::COOKIE,
+                &cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+        let cleared = logout
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cleared.contains("Max-Age=0"));
+
+        let after = app
+            .clone()
+            .oneshot(with_header(get("/api/status"), header::COOKIE, &cookie))
+            .await
+            .unwrap();
+        assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_required_off_lets_status_through() {
+        let (_dir, app) = router_with(|paths| {
+            paths.ensure().unwrap();
+            let mut config = Config::default();
+            config.admin.auth_required = false;
+            config.save(&paths.config()).unwrap();
+        });
+
+        let status = app.oneshot(get("/api/status")).await.unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_without_a_password_is_forbidden() {
+        let (_dir, app) = router_with(|_| {});
+
+        let login = app
+            .oneshot(post_json(
+                "/api/auth/login",
+                r#"{"password":"long-enough"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::FORBIDDEN);
+        assert!(text(login).await.contains("no admin password is set"));
+    }
+
+    #[tokio::test]
+    async fn tls_enabled_marks_the_session_cookie_secure() {
+        let (_dir, app) = router_with(|paths| {
+            crate::auth::cli::store_password(paths, PASSWORD).unwrap();
+            paths.ensure().unwrap();
+            let mut config = Config::default();
+            config.admin.tls_enabled = true;
+            config.save(&paths.config()).unwrap();
+        });
+
+        let state = text(app.clone().oneshot(get("/api/auth/state")).await.unwrap()).await;
+        assert!(state.contains("\"tls\":true"));
+
+        let login = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &format!(r#"{{"password":"{PASSWORD}"}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::NO_CONTENT);
+        let set_cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains("Secure"));
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Strict"));
+
+        let cookie = set_cookie.split(';').next().unwrap();
+        let logout = app
+            .clone()
+            .oneshot(with_header(
+                post_json("/api/auth/logout", ""),
+                header::COOKIE,
+                cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+        let cleared = logout
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cleared.contains("Secure"));
+        assert!(cleared.contains("Max-Age=0"));
     }
 }

@@ -10,6 +10,7 @@ use anyhow::Result;
 use parking_lot::RwLock;
 use time::OffsetDateTime;
 
+use crate::auth::AuthState;
 use crate::ca::CertAuthority;
 use crate::config::{Config, Paths};
 use crate::domains::{self, DomainSet};
@@ -23,6 +24,7 @@ pub struct AppState {
     pub stats: Stats,
     pub http: reqwest::Client,
     pub started: OffsetDateTime,
+    pub auth: AuthState,
 
     config: RwLock<Config>,
     filter: RwLock<Arc<FilterEngine>>,
@@ -38,15 +40,29 @@ pub struct ListStatuses {
 
 impl AppState {
     pub async fn new(paths: Paths) -> Result<Arc<Self>> {
+        let state = Self::create(paths)?;
+        state.reload().await;
+        Ok(state)
+    }
+
+    /// Like [`new`](Self::new), but skips the engine rebuild. Router tests use
+    /// this so they do not compile filter lists.
+    #[cfg(test)]
+    pub fn for_tests(paths: Paths) -> Result<Arc<Self>> {
+        Self::create(paths)
+    }
+
+    fn create(paths: Paths) -> Result<Arc<Self>> {
         paths.ensure()?;
 
         let config = Config::load_or_create(&paths.config())?;
+        let auth = AuthState::load(&paths)?;
         let ca = Arc::new(CertAuthority::load_or_create(
             &paths.ca_cert(),
             &paths.ca_key(),
         )?);
 
-        let state = Arc::new(Self {
+        Ok(Arc::new(Self {
             list_status: RwLock::new(ListStatuses {
                 dns: lists::statuses(&paths, &config.dns.blocklists),
                 filters: lists::statuses(&paths, &config.filtering.lists),
@@ -59,10 +75,8 @@ impl AppState {
             stats: Stats::new(),
             http: lists::client(),
             started: OffsetDateTime::now_utc(),
-        });
-
-        state.reload().await;
-        Ok(state)
+            auth,
+        }))
     }
 
     pub fn config(&self) -> Config {

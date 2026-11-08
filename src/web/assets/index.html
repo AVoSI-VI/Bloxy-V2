@@ -16,12 +16,17 @@
       </div>
     </header>
 
+    <div id="auth-warning" class="banner hidden">
+      Authentication is off. Anyone who can open this page can change the configuration.
+    </div>
+
     <nav id="tabs">
       <button type="button" class="tab active" data-panel="overview">Overview</button>
       <button type="button" class="tab" data-panel="dns">DNS blocking</button>
       <button type="button" class="tab" data-panel="filters">Filter lists</button>
       <button type="button" class="tab" data-panel="proxy">Proxy &amp; CA</button>
       <button type="button" class="tab" data-panel="events">Blocked events</button>
+      <button type="button" class="tab" data-panel="admin">Admin</button>
     </nav>
 
     <main>
@@ -292,8 +297,115 @@
         </table>
         <p class="hint" id="events-empty">Nothing blocked yet.</p>
       </section>
+
+      <!-- ------------------------------------------------------- Admin -->
+      <section id="admin" class="panel">
+        <h2>Session</h2>
+        <div class="actions">
+          <button type="button" id="sign-out">Sign out</button>
+        </div>
+
+        <h2>Password</h2>
+        <form id="change-password">
+          <div class="field">
+            <label for="password-current">Current password</label>
+            <input
+              type="password"
+              id="password-current"
+              autocomplete="current-password"
+            />
+          </div>
+          <div class="field">
+            <label for="password-new">New password</label>
+            <input type="password" id="password-new" autocomplete="new-password" />
+          </div>
+          <div class="field">
+            <label for="password-confirm">Confirm new password</label>
+            <input
+              type="password"
+              id="password-confirm"
+              autocomplete="new-password"
+            />
+          </div>
+          <div class="actions">
+            <button type="submit" id="password-submit">Change password</button>
+          </div>
+          <p id="password-message" class="hint"></p>
+        </form>
+
+        <h2>API token</h2>
+        <p class="hint">
+          A bearer token for scripts. Generating a new one replaces the old one.
+          The token is shown once and is not stored in the browser.
+        </p>
+        <div class="actions">
+          <button type="button" id="generate-token">Generate</button>
+          <button type="button" id="revoke-token" class="secondary">Revoke</button>
+        </div>
+        <div id="token-once" class="token-once hidden">
+          <input type="text" id="token-value" readonly />
+          <button type="button" id="copy-token" class="secondary">Copy</button>
+        </div>
+        <p id="token-message" class="hint"></p>
+
+        <h2>Access</h2>
+        <div class="field">
+          <label for="auth-required">
+            <input type="checkbox" id="auth-required" data-config="admin.auth_required" />
+            Require a password or API token
+          </label>
+          <p class="hint">Takes effect immediately.</p>
+        </div>
+        <div class="field">
+          <label for="tls-enabled">
+            <input type="checkbox" id="tls-enabled" data-config="admin.tls_enabled" />
+            Serve this interface over HTTPS
+          </label>
+          <p class="hint" id="tls-hint">
+            Takes effect after a restart. The browser must trust the bloxy CA.
+          </p>
+        </div>
+        <div class="field">
+          <label for="tls-hostname">TLS hostname</label>
+          <input
+            type="text"
+            id="tls-hostname"
+            data-config="admin.tls_hostname"
+            placeholder="admin.example"
+            spellcheck="false"
+          />
+          <p class="hint">
+            Name on the certificate. Leave blank to use the listen address.
+            Takes effect after a restart.
+          </p>
+        </div>
+      </section>
     </main>
 
+    <section id="login" class="overlay hidden">
+      <form id="login-form" class="card">
+        <h2>Sign in</h2>
+        <div class="field">
+          <label for="login-password">Password</label>
+          <input
+            type="password"
+            id="login-password"
+            autocomplete="current-password"
+          />
+        </div>
+        <p id="login-error" class="error-text"></p>
+        <div class="actions">
+          <button type="submit" id="login-submit">Sign in</button>
+        </div>
+      </form>
+      <div id="login-locked" class="card hidden">
+        <h2>Locked</h2>
+        <p>Run bloxy --set-admin-password on the server, then reload.</p>
+      </div>
+    </section>
+
     <script src="/app.js"></script>
+    <script src="/panels.js"></script>
+    <script src="/auth.js"></script>
   </body>
 </html>

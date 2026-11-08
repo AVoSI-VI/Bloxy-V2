@@ -19,7 +19,9 @@ cargo build --release
 ```
 
 On the first run bloxy creates a `data/` directory holding `config.json`, the
-generated CA under `data/ca/`, and a cache of downloaded lists. `--update-lists`
+generated CA under `data/ca/`, and a cache of downloaded lists. The admin
+password and API token hashes go in `data/admin-auth.json` once you set them
+(see [Admin authentication](#admin-authentication)). `--update-lists`
 downloads every enabled list; without it, bloxy starts from whatever is already
 cached.
 
@@ -31,18 +33,69 @@ The defaults bind everything to loopback:
 | DNS              | `127.0.0.1:5353`    |
 | Admin interface  | `127.0.0.1:8081`    |
 
-Open <http://127.0.0.1:8081> to administer it. To serve other machines on the
-network, change the listen addresses to `0.0.0.0` — but note there is **no
-authentication on the admin interface**, so leave it on loopback or put it
-behind something that does authenticate.
+Open <http://127.0.0.1:8081> to administer it. The interface asks for the admin
+password, which you set once from the command line (see
+[Admin authentication](#admin-authentication)). To serve other machines on the
+network, change the listen addresses to `0.0.0.0` and turn on TLS for the admin
+interface so the password and session cookie do not cross the network in clear.
 
 Options:
 
 ```
---data-dir <DIR>    Config, CA, and list cache location (default: data)
---update-lists      Download every enabled list on startup
---log <FILTER>      tracing filter, e.g. "debug" or "bloxy::proxy=trace"
+--data-dir <DIR>        Config, CA, and list cache location (default: data)
+--update-lists          Download every enabled list on startup
+--log <FILTER>          tracing filter, e.g. "debug" or "bloxy::proxy=trace"
+--set-admin-password    Prompt for a new admin password, store it, and exit
+--new-api-token         Generate a new API token, print it once, and exit
 ```
+
+## Admin authentication
+
+The admin interface is locked until an admin password exists. Set one on the
+server, then reload the page and sign in:
+
+```sh
+./target/release/bloxy --set-admin-password
+```
+
+It prompts twice without echo; when stdin is not a terminal it reads one line
+instead, so `echo "$PW" | bloxy --set-admin-password` works in scripts. The
+minimum is 8 characters. Only an Argon2id hash is stored, in
+`data/admin-auth.json`. Signing in sets an `HttpOnly`, `SameSite=Strict`
+session cookie. Sessions live in memory, expire after 24 hours idle, and do not
+survive a restart. Five failed attempts from one address within 15 minutes lock
+that address out until the window passes. The **Admin** tab has Sign out and a
+change-password form; changing the password signs every other session out.
+
+Scripts use a bearer token instead of a password. Generate one from the
+**Admin** tab or from the command line:
+
+```sh
+./target/release/bloxy --new-api-token
+```
+
+The token is printed once and only its SHA-256 is kept, so copy it then. There
+is one token at a time; generating a new one replaces the old one, and the Admin
+tab can revoke it. The token works on every `/api/` route except credential
+management and logout, which need a browser session:
+
+```sh
+curl -H "Authorization: Bearer bloxy_..." http://127.0.0.1:8081/api/status
+```
+
+Two settings on the **Admin** tab control the listener itself, and are also in
+`config.json` under `admin`:
+
+- `auth_required` (default `true`). Off, every request passes without
+  credentials and the interface shows a warning banner. Leave it on unless the
+  listener is on loopback and nobody else can reach the machine; bloxy logs a
+  warning at startup when it is off on a non-loopback address.
+- `tls_enabled` (default `false`) and `tls_hostname`. On, the admin listener
+  serves HTTPS with a certificate minted by bloxy's own CA for `tls_hostname`,
+  or for the listen IP when that is blank. The browser has to trust the CA
+  (see [Trusting the CA](#trusting-the-ca)); `curl` needs
+  `--cacert data/ca/bloxy-ca.crt`. The session cookie gains `Secure`. Changing
+  either setting needs a restart.
 
 ## Trusting the CA
 
@@ -120,7 +173,8 @@ the interface says so when you save.
 
 ## Limitations
 
-- The admin interface has no authentication.
+- The admin interface has one admin identity: no users, roles, or external
+  sign-in. Sessions are in memory, so a restart signs everyone out.
 - The proxy speaks HTTP/1.1 only, and negotiates it via ALPN with both the
   client and the origin. HTTP/2 and HTTP/3 are not intercepted.
 - QUIC is not handled at all, because a proxy is a TCP construct and HTTP/3 runs
@@ -147,13 +201,22 @@ src/
   domains.rs    domain matching and hosts-file parsing
   filter.rs     uBlock Origin filter matching
   lists.rs      list downloads and caching
+  auth/
+    mod.rs      credentials file, password and token hashing, AuthState
+    cli.rs      --set-admin-password and --new-api-token
+    session.rs  in-memory session store, cookie parse and build
+    lockout.rs  per-IP login failure tracker
   proxy/
     mod.rs      listener, CONNECT handling, request filtering
     upstream.rs origin connections and reuse
     rewrite.rs  cosmetic filter injection
   web/
-    mod.rs      admin JSON API
-    assets/     index.html, app.js, style.css
+    mod.rs      router assembly and static assets
+    api.rs      admin JSON API
+    auth_api.rs /api/auth/* handlers
+    guard.rs    require_auth middleware
+    serve.rs    accept loop, optional TLS
+    assets/     index.html, style.css, app.js, panels.js, auth.js
 ```
 
 Run the tests with `cargo test`.

@@ -1,6 +1,6 @@
 [package]
 name = "bloxy"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.85"
 description = "MITM filtering proxy with a DNS blackhole and uBlock Origin filter list support"
@@ -13,11 +13,13 @@ bytes = "1"
 
 # HTTP proxy
 hyper = { version = "1", features = ["server", "client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
 http-body-util = "0.1"
 
-# Admin interface
+# Admin interface. `tower` wraps the router so each accepted connection can
+# stamp the client address onto the request.
 axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
 
 # TLS / certificate authority
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -66,6 +68,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 clap = { version = "4", features = ["derive"] }
+
+# Admin authentication. The password is Argon2id; the API token is compared
+# in constant time. `rpassword` reads the bootstrap password without echo.
+argon2 = "0.5"
+# `OsRng` lives on the `rand_core` that `argon2` re-exports, and that crate
+# only exposes it with the `getrandom` feature, which argon2 does not forward.
+password-hash = { version = "0.5", features = ["getrandom"] }
+subtle = "2"
+rpassword = "7"
 
 [dev-dependencies]
 tempfile = "3"

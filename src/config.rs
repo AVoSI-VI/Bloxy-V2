@@ -143,12 +143,29 @@ impl Default for FilteringConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
     pub listen: SocketAddr,
+    /// When false, the admin interface accepts every request. Default on.
+    ///
+    /// This default has to be field-level. `#[serde(default)]` on the struct
+    /// fills a missing field from the field type, and `bool` defaults to
+    /// `false`, so a `config.json` that already has an `admin` object would
+    /// otherwise turn authentication off.
+    #[serde(default = "default_true")]
+    pub auth_required: bool,
+    /// Terminate TLS on the admin listener with a certificate from the local CA.
+    #[serde(default)]
+    pub tls_enabled: bool,
+    /// Name on that certificate. When unset, the listen address's IP is used.
+    #[serde(default)]
+    pub tls_hostname: Option<String>,
 }
 
 impl Default for AdminConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:8081".parse().unwrap(),
+            auth_required: true,
+            tls_enabled: false,
+            tls_hostname: None,
         }
     }
 }
@@ -166,6 +183,18 @@ fn default_true() -> bool {
     true
 }
 
+/// Writes pretty-printed JSON via a sibling temporary file, then renames it
+/// into place. A crash mid-write leaves the previous file intact.
+pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing config {}", path.display()))?;
+    Ok(())
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
@@ -179,14 +208,7 @@ impl Config {
     /// Writes via a temporary file so a crash mid-write cannot truncate the
     /// existing config.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("writing config {}", path.display()))?;
-        Ok(())
+        write_json_atomic(path, self)
     }
 
     pub fn load_or_create(path: &Path) -> Result<Self> {
@@ -213,6 +235,12 @@ impl Paths {
 
     pub fn config(&self) -> PathBuf {
         self.root.join("config.json")
+    }
+
+    /// Password hash and API token hash. Kept out of `config.json` because
+    /// that file is returned by the admin API and edited whole by the UI.
+    pub fn admin_auth(&self) -> PathBuf {
+        self.root.join("admin-auth.json")
     }
 
     pub fn ca_cert(&self) -> PathBuf {
@@ -283,6 +311,21 @@ mod tests {
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.proxy.listen, Config::default().proxy.listen);
         assert!(loaded.filtering.enabled);
+        assert!(loaded.admin.auth_required);
+        assert!(!loaded.admin.tls_enabled);
+        assert!(loaded.admin.tls_hostname.is_none());
+    }
+
+    #[test]
+    fn admin_defaults_hold_when_the_section_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{\"admin\":{\"listen\":\"127.0.0.1:8081\"}}").unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+        assert!(loaded.admin.auth_required);
+        assert!(!loaded.admin.tls_enabled);
+        assert!(loaded.admin.tls_hostname.is_none());
     }
 
     #[test]
@@ -304,6 +347,15 @@ mod tests {
         assert_ne!(
             paths.cached_list("https://a.example/list.txt"),
             paths.cached_list("https://b.example/list.txt")
+        );
+    }
+
+    #[test]
+    fn admin_auth_lives_next_to_the_config() {
+        let paths = Paths::new(PathBuf::from("data"));
+        assert_eq!(
+            paths.admin_auth(),
+            PathBuf::from("data").join("admin-auth.json")
         );
     }
 }

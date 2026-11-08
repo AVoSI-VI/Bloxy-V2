@@ -1,5 +1,6 @@
 //! bloxy: a filtering proxy with a DNS blackhole and a small admin interface.
 
+mod auth;
 mod ca;
 mod config;
 mod dns;
@@ -34,6 +35,14 @@ struct Args {
     /// Log filter, in `tracing` syntax.
     #[arg(long, value_name = "FILTER", default_value = "info")]
     log: String,
+
+    /// Prompt for a new admin password, store it, and exit.
+    #[arg(long)]
+    set_admin_password: bool,
+
+    /// Generate a new API token, print it once, and exit.
+    #[arg(long)]
+    new_api_token: bool,
 }
 
 fn main() -> Result<()> {
@@ -45,6 +54,10 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&args.log)),
         )
         .init();
+
+    if args.set_admin_password || args.new_api_token {
+        return store_credentials(&args);
+    }
 
     // Every TLS user in the process shares this provider, including reqwest,
     // which is built with `rustls-no-provider` for exactly this reason.
@@ -69,6 +82,8 @@ async fn run(args: Args) -> Result<()> {
         "CA fingerprint SHA-256 {}",
         state.ca.fingerprint()
     );
+
+    warn_about_admin_auth(&state);
 
     if args.update_lists {
         tracing::info!("downloading filter lists");
@@ -113,6 +128,36 @@ async fn run(args: Args) -> Result<()> {
                 Err(error) => Err(anyhow::anyhow!("a service task panicked: {error}")),
             }
         }
+    }
+}
+
+/// Password and token commands stay out of the runtime. Building `AppState`
+/// reloads every cached list, and these flags need only the credentials file.
+fn store_credentials(args: &Args) -> Result<()> {
+    let paths = Paths::new(args.data_dir.clone());
+    paths.ensure().context("preparing the data directory")?;
+    if args.set_admin_password {
+        auth::cli::set_password(&paths)?;
+    }
+    if args.new_api_token {
+        auth::cli::new_token(&paths)?;
+    }
+    Ok(())
+}
+
+fn warn_about_admin_auth(state: &AppState) {
+    let admin = state.config().admin;
+    if !admin.auth_required && !admin.listen.ip().is_loopback() {
+        tracing::warn!(
+            listen = %admin.listen,
+            "admin.auth_required is off and the listener is not loopback; \
+             the admin interface accepts every request"
+        );
+    }
+    if admin.auth_required && state.auth.credentials().password_hash.is_none() {
+        tracing::warn!(
+            "no admin password is set; the admin interface is locked until you run bloxy --set-admin-password"
+        );
     }
 }
 

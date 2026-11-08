@@ -6,6 +6,9 @@ let config = null;
 let statusTimer = null;
 let eventsTimer = null;
 let saveTimer = null;
+// A status poll must not replace `config` while an edit is waiting to be saved.
+let configRevision = 0;
+let savedRevision = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -21,6 +24,9 @@ async function api(path, options) {
     } catch (_) {
       /* the body was not JSON; the status text will do */
     }
+    // A wrong password is also a 401, and that session is still valid.
+    // Only a missing session should cover the page with the login overlay.
+    if (response.status === 401 && detail !== "invalid credentials") showLogin();
     throw new Error(detail);
   }
   return response.status === 204 ? null : response.json();
@@ -79,10 +85,12 @@ function setSaveState(text, className) {
 /** Sends the whole config, debounced so rapid edits cause one rebuild. */
 function saveConfig({ immediate = false } = {}) {
   clearTimeout(saveTimer);
+  const revision = ++configRevision;
   const delay = immediate ? 0 : 500;
 
   return new Promise((resolve) => {
     saveTimer = setTimeout(async () => {
+      saveTimer = null;
       setSaveState("Saving\u2026", "saving");
       try {
         const result = await api("/api/config", {
@@ -90,6 +98,7 @@ function saveConfig({ immediate = false } = {}) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(config),
         });
+        if (configRevision === revision) savedRevision = revision;
         setSaveState(result.restart_required ? "Saved (restart needed)" : "Saved", "saved");
         await refreshStatus();
       } catch (error) {
@@ -117,7 +126,9 @@ function collectAndSave() {
         .filter((line) => line.length > 0);
       setPath(config, path, lines);
     } else {
-      setPath(config, path, element.value.trim());
+      const text = element.value.trim();
+      // An empty hostname means unset, so the listener's IP is used.
+      setPath(config, path, path === "admin.tls_hostname" && text === "" ? null : text);
     }
   }
 
@@ -152,7 +163,10 @@ async function refreshStatus() {
     return;
   }
 
-  config = status.config;
+  // Dropping an edit here was how a checkbox could say "Saved" and not stick.
+  if (saveTimer == null && configRevision === savedRevision) {
+    config = status.config;
+  }
 
   $("version").textContent = `v${status.version}`;
   $("uptime").textContent = formatDuration(status.uptime_seconds);
@@ -184,178 +198,11 @@ async function refreshStatus() {
   renderDomains();
   renderLists("dns-lists", status.dns_lists, "dns");
   renderLists("filter-lists", status.filter_lists, "filtering");
-}
 
-// ------------------------------------------------------------------ domains
-
-function renderDomains() {
-  renderDomainList("blocked-domains", config.dns.blocked_domains, "blocked");
-  renderDomainList("allowed-domains", config.dns.allowed_domains, "allowed");
-}
-
-function renderDomainList(elementId, domains, list) {
-  const container = $(elementId);
-  container.textContent = "";
-
-  if (!domains.length) {
-    const empty = document.createElement("li");
-    empty.textContent = "none";
-    empty.style.opacity = "0.5";
-    container.append(empty);
-    return;
-  }
-
-  for (const domain of domains) {
-    const item = document.createElement("li");
-    const label = document.createElement("span");
-    label.textContent = domain;
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "link";
-    remove.textContent = "\u00d7";
-    remove.title = `Remove ${domain}`;
-    remove.addEventListener("click", () => editDomain(list, "remove", domain));
-
-    item.append(label, remove);
-    container.append(item);
-  }
-}
-
-async function editDomain(list, action, domain) {
-  setSaveState("Saving\u2026", "saving");
   try {
-    await api("/api/domains", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ list, action, domain }),
-    });
-    setSaveState("Saved", "saved");
-    await refreshStatus();
-  } catch (error) {
-    setSaveState(`Save failed: ${error.message}`, "failed");
-  }
-}
-
-// -------------------------------------------------------------------- lists
-
-/** `section` is the config key holding the list array: "dns" or "filtering". */
-function renderLists(elementId, statuses, section) {
-  const body = $(elementId);
-  body.textContent = "";
-
-  const sources = section === "dns" ? config.dns.blocklists : config.filtering.lists;
-
-  statuses.forEach((status, index) => {
-    const row = document.createElement("tr");
-
-    const toggleCell = document.createElement("td");
-    const toggle = document.createElement("input");
-    toggle.type = "checkbox";
-    toggle.checked = status.enabled;
-    toggle.title = status.enabled ? "Disable this list" : "Enable this list";
-    toggle.addEventListener("change", () => {
-      sources[index].enabled = toggle.checked;
-      saveConfig({ immediate: true });
-    });
-    toggleCell.append(toggle);
-
-    const nameCell = document.createElement("td");
-    nameCell.textContent = status.name;
-
-    const urlCell = document.createElement("td");
-    urlCell.className = "url";
-    urlCell.textContent = status.url;
-    if (status.error) {
-      const error = document.createElement("div");
-      error.className = "error-text";
-      error.textContent = status.error;
-      urlCell.append(error);
-    }
-
-    const sizeCell = document.createElement("td");
-    sizeCell.className = "numeric";
-    sizeCell.textContent = formatBytes(status.bytes);
-
-    const updatedCell = document.createElement("td");
-    updatedCell.className = "numeric";
-    updatedCell.textContent = formatWhen(status.updated);
-
-    const removeCell = document.createElement("td");
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "link";
-    remove.textContent = "\u00d7";
-    remove.title = `Remove ${status.name}`;
-    remove.addEventListener("click", () => {
-      sources.splice(index, 1);
-      saveConfig({ immediate: true });
-    });
-    removeCell.append(remove);
-
-    row.append(toggleCell, nameCell, urlCell, sizeCell, updatedCell, removeCell);
-    body.append(row);
-  });
-}
-
-function wireAddList(formId, nameId, urlId, section) {
-  $(formId).addEventListener("submit", (event) => {
-    event.preventDefault();
-    const name = $(nameId).value.trim();
-    const url = $(urlId).value.trim();
-    if (!url) return;
-
-    const sources = section === "dns" ? config.dns.blocklists : config.filtering.lists;
-    sources.push({ name: name || url, url, enabled: true });
-    $(nameId).value = "";
-    $(urlId).value = "";
-
-    // The list is empty until it has been downloaded at least once.
-    saveConfig({ immediate: true }).then(() => refreshLists());
-  });
-}
-
-// -------------------------------------------------------------------- events
-
-async function refreshEvents() {
-  let events;
-  try {
-    events = await api("/api/events?limit=200");
+    await checkAuth();
   } catch (_) {
-    return;
-  }
-
-  const body = $("events-body");
-  body.textContent = "";
-  $("events-empty").style.display = events.length ? "none" : "block";
-
-  for (const event of events) {
-    const row = document.createElement("tr");
-
-    const time = document.createElement("td");
-    time.className = "numeric";
-    time.textContent = new Date(event.time).toLocaleTimeString();
-
-    const source = document.createElement("td");
-    const tag = document.createElement("span");
-    tag.className = "tag";
-    tag.textContent = event.source;
-    source.append(tag);
-
-    const client = document.createElement("td");
-    client.className = "numeric";
-    client.textContent = event.client;
-
-    const target = document.createElement("td");
-    target.className = "url";
-    target.textContent = event.target;
-
-    const reason = document.createElement("td");
-    reason.className = "url";
-    reason.textContent = event.reason;
-
-    row.append(time, source, client, target, reason);
-    body.append(row);
+    /* the banner can catch up on the next poll */
   }
 }
 
@@ -403,26 +250,6 @@ function wireConfigFields() {
   }
 }
 
-function wireDomainForms() {
-  $("add-blocked").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const input = $("add-blocked-input");
-    if (input.value.trim()) {
-      editDomain("blocked", "add", input.value.trim());
-      input.value = "";
-    }
-  });
-
-  $("add-allowed").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const input = $("add-allowed-input");
-    if (input.value.trim()) {
-      editDomain("allowed", "add", input.value.trim());
-      input.value = "";
-    }
-  });
-}
-
 function wireActions() {
   $("refresh-lists").addEventListener("click", refreshLists);
 
@@ -450,6 +277,23 @@ function wireActions() {
   });
 }
 
+function stopPolling() {
+  clearInterval(statusTimer);
+  clearInterval(eventsTimer);
+  statusTimer = null;
+  eventsTimer = null;
+}
+
+/** Status and events. Runs once the gate is open, or when authentication is off. */
+async function loadInterface() {
+  const state = await checkAuth();
+  if (state.auth_required && !state.authenticated) return;
+  await refreshStatus();
+  await refreshEvents();
+  if (statusTimer == null) statusTimer = setInterval(refreshStatus, 5000);
+  if (eventsTimer == null) eventsTimer = setInterval(refreshEvents, 3000);
+}
+
 async function init() {
   wireTabs();
   wireConfigFields();
@@ -457,12 +301,8 @@ async function init() {
   wireActions();
   wireAddList("add-dns-list", "add-dns-list-name", "add-dns-list-url", "dns");
   wireAddList("add-filter-list", "add-filter-list-name", "add-filter-list-url", "filtering");
-
-  await refreshStatus();
-  await refreshEvents();
-
-  statusTimer = setInterval(refreshStatus, 5000);
-  eventsTimer = setInterval(refreshEvents, 3000);
+  wireAuth();
+  await loadInterface();
 }
 
 document.addEventListener("DOMContentLoaded", init);
