@@ -10,6 +10,7 @@ use anyhow::Result;
 use parking_lot::RwLock;
 use time::OffsetDateTime;
 
+use crate::auth::AuthState;
 use crate::ca::CertAuthority;
 use crate::config::{Config, Paths};
 use crate::domains::{self, DomainSet};
@@ -23,6 +24,7 @@ pub struct AppState {
     pub stats: Stats,
     pub http: reqwest::Client,
     pub started: OffsetDateTime,
+    pub auth: AuthState,
 
     config: RwLock<Config>,
     filter: RwLock<Arc<FilterEngine>>,
@@ -54,6 +56,7 @@ impl AppState {
         paths.ensure()?;
 
         let config = Config::load_or_create(&paths.config())?;
+        let auth = AuthState::load(&paths)?;
         let ca = Arc::new(CertAuthority::load_or_create(
             &paths.ca_cert(),
             &paths.ca_key(),
@@ -72,6 +75,7 @@ impl AppState {
             stats: Stats::new(),
             http: lists::client(),
             started: OffsetDateTime::now_utc(),
+            auth,
         }))
     }
 

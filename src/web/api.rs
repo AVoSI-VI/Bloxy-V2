@@ -182,11 +182,15 @@ pub(super) struct ApiError {
 }
 
 impl ApiError {
-    pub(super) fn bad_request(message: &str) -> Self {
+    pub(super) fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::BAD_REQUEST,
-            message: message.to_string(),
+            status,
+            message: message.into(),
         }
+    }
+
+    pub(super) fn bad_request(message: &str) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, message)
     }
 }
 

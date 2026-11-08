@@ -1,12 +1,15 @@
 //! Admin credentials. The password and the API token live in their own file,
 //! never in `config.json`, which the admin API returns and the UI edits whole.
 
-use std::io::IsTerminal;
+pub(crate) mod cli;
+pub(crate) mod lockout;
+pub(crate) mod session;
 
 use anyhow::{Context, Result};
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
@@ -15,6 +18,10 @@ use crate::config::{write_json_atomic, Paths};
 
 /// Same minimum the password-change API will enforce.
 pub(crate) const MIN_PASSWORD_CHARS: usize = 8;
+
+/// Compared when no API token is stored, so that case does the same SHA-256
+/// work as a wrong token. 64 hex characters, the length of a real hash.
+const DUMMY_TOKEN_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -38,6 +45,52 @@ impl Credentials {
     pub fn save(&self, paths: &Paths) -> Result<()> {
         write_json_atomic(&paths.admin_auth(), self)
     }
+
+    /// Constant-time token check. A missing token is compared with a dummy
+    /// hash of the same length, so the two answers take the same path.
+    pub fn accepts_token(&self, presented: &str) -> bool {
+        let stored = self.api_token_hash.as_deref().unwrap_or(DUMMY_TOKEN_HASH);
+        let matches = token_matches(stored, presented);
+        self.api_token_hash.is_some() && matches
+    }
+}
+
+/// Password hash, API token hash, and the in-memory session and lockout state.
+pub struct AuthState {
+    /// Kept so `set_credentials` can write the file. Phase 3 is the first
+    /// caller outside the tests, so a non-test build does not read it yet.
+    #[allow(dead_code)]
+    paths: Paths,
+    credentials: RwLock<Credentials>,
+    pub sessions: session::Store,
+    pub lockout: lockout::Tracker,
+}
+
+impl AuthState {
+    pub fn load(paths: &Paths) -> Result<Self> {
+        Ok(Self {
+            credentials: RwLock::new(Credentials::load_or_default(paths)?),
+            sessions: session::Store::new(),
+            lockout: lockout::Tracker::new(),
+            paths: paths.clone(),
+        })
+    }
+
+    pub fn credentials(&self) -> Credentials {
+        self.credentials.read().clone()
+    }
+
+    /// Writes the file, then swaps the in-memory copy. A failed write leaves
+    /// the previous credentials in place.
+    ///
+    /// The password and token handlers are the callers. Until those land,
+    /// only the tests use it.
+    #[allow(dead_code)]
+    pub fn set_credentials(&self, credentials: Credentials) -> Result<()> {
+        credentials.save(&self.paths)?;
+        *self.credentials.write() = credentials;
+        Ok(())
+    }
 }
 
 /// Argon2id PHC string, using `Argon2::default()` parameters.
@@ -51,8 +104,8 @@ pub fn hash_password(password: &str) -> Result<String> {
 
 /// `false` for a wrong password and for a hash this build cannot parse.
 ///
-/// The login handler is the caller. Until that lands, only the tests use it.
-#[allow(dead_code)]
+/// Callers must run this through `spawn_blocking`. Argon2id takes tens of
+/// milliseconds and would stall every other admin request on a worker thread.
 pub fn verify_password(hash: &str, password: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(hash) else {
         return false;
@@ -71,67 +124,9 @@ pub fn new_api_token() -> (String, String) {
 }
 
 /// Constant-time compare of a stored SHA-256 hex against `presented`.
-///
-/// The request gate is the caller. Until that lands, only the tests use it.
-#[allow(dead_code)]
 pub fn token_matches(hash_hex: &str, presented: &str) -> bool {
     let actual = ca::hex(&ca::sha256(presented.as_bytes()));
     bool::from(hash_hex.as_bytes().ct_eq(actual.as_bytes()))
-}
-
-/// Prompts (or reads one stdin line), stores the password, and leaves any
-/// existing API token in place.
-pub fn set_password(paths: &Paths) -> Result<()> {
-    let password = read_new_password()?;
-    store_password(paths, &password)?;
-    eprintln!("admin password saved");
-    Ok(())
-}
-
-pub(crate) fn store_password(paths: &Paths, password: &str) -> Result<()> {
-    if password.chars().count() < MIN_PASSWORD_CHARS {
-        anyhow::bail!("password must be at least {MIN_PASSWORD_CHARS} characters");
-    }
-    let mut credentials = Credentials::load_or_default(paths)?;
-    credentials.password_hash = Some(hash_password(password)?);
-    credentials.save(paths)
-}
-
-/// Prints a fresh token on stdout. The previous token stops working.
-pub fn new_token(paths: &Paths) -> Result<()> {
-    let token = store_new_token(paths)?;
-    println!("{token}");
-    eprintln!("this token will not be shown again");
-    Ok(())
-}
-
-pub(crate) fn store_new_token(paths: &Paths) -> Result<String> {
-    let (token, hash) = new_api_token();
-    let mut credentials = Credentials::load_or_default(paths)?;
-    credentials.api_token_hash = Some(hash);
-    credentials.save(paths)?;
-    Ok(token)
-}
-
-fn read_new_password() -> Result<String> {
-    let password = if std::io::stdin().is_terminal() {
-        let first =
-            rpassword::prompt_password("New admin password: ").context("reading the password")?;
-        let second = rpassword::prompt_password("Confirm admin password: ")
-            .context("reading the password confirmation")?;
-        if first != second {
-            anyhow::bail!("passwords do not match");
-        }
-        first
-    } else {
-        // `echo pw | bloxy --set-admin-password` has no second line to confirm.
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .context("reading the password from stdin")?;
-        line.trim_end_matches(['\r', '\n']).to_string()
-    };
-    Ok(password)
 }
 
 #[cfg(test)]
@@ -158,11 +153,20 @@ mod tests {
         assert_eq!(token.len(), "bloxy_".len() + 64);
         assert_eq!(hash, ca::hex(&ca::sha256(token.as_bytes())));
         assert!(token_matches(&hash, &token));
+        assert_eq!(DUMMY_TOKEN_HASH.len(), hash.len());
 
         let mut changed = token.clone();
         let last = changed.pop().unwrap();
         changed.push(if last == 'a' { 'b' } else { 'a' });
         assert!(!token_matches(&hash, &changed));
+    }
+
+    #[test]
+    fn a_missing_token_does_not_match_an_empty_or_dummy_presentation() {
+        let credentials = Credentials::default();
+        assert!(!credentials.accepts_token(""));
+        assert!(!credentials.accepts_token(DUMMY_TOKEN_HASH));
+        assert!(!credentials.accepts_token("bloxy_not-a-real-token"));
     }
 
     #[test]
@@ -185,43 +189,26 @@ mod tests {
     }
 
     #[test]
-    fn storing_a_password_keeps_the_existing_token() {
+    fn set_credentials_saves_before_it_swaps() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path().to_path_buf());
-        let token = store_new_token(&paths).unwrap();
+        let auth = AuthState::load(&paths).unwrap();
+        assert!(auth.credentials().password_hash.is_none());
 
-        store_password(&paths, "long-enough").unwrap();
+        auth.set_credentials(Credentials {
+            password_hash: Some("stored-hash".into()),
+            api_token_hash: None,
+        })
+        .unwrap();
 
-        let loaded = Credentials::load_or_default(&paths).unwrap();
-        assert!(verify_password(
-            loaded.password_hash.as_deref().unwrap(),
-            "long-enough"
-        ));
-        assert!(token_matches(
-            loaded.api_token_hash.as_deref().unwrap(),
-            &token
-        ));
-    }
-
-    #[test]
-    fn a_short_password_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::new(dir.path().to_path_buf());
-        let error = store_password(&paths, "short").unwrap_err();
-        assert!(error.to_string().contains("at least 8"));
-        assert!(!paths.admin_auth().exists());
-    }
-
-    #[test]
-    fn a_new_token_replaces_the_previous_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::new(dir.path().to_path_buf());
-        let first = store_new_token(&paths).unwrap();
-        let second = store_new_token(&paths).unwrap();
-
-        let loaded = Credentials::load_or_default(&paths).unwrap();
-        let hash = loaded.api_token_hash.unwrap();
-        assert!(!token_matches(&hash, &first));
-        assert!(token_matches(&hash, &second));
+        assert_eq!(
+            auth.credentials().password_hash.as_deref(),
+            Some("stored-hash")
+        );
+        let reloaded = AuthState::load(&paths).unwrap();
+        assert_eq!(
+            reloaded.credentials().password_hash.as_deref(),
+            Some("stored-hash")
+        );
     }
 }

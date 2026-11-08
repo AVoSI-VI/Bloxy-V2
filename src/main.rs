@@ -83,6 +83,8 @@ async fn run(args: Args) -> Result<()> {
         state.ca.fingerprint()
     );
 
+    warn_about_admin_auth(&state);
+
     if args.update_lists {
         tracing::info!("downloading filter lists");
         state.refresh_lists().await;
@@ -135,12 +137,28 @@ fn store_credentials(args: &Args) -> Result<()> {
     let paths = Paths::new(args.data_dir.clone());
     paths.ensure().context("preparing the data directory")?;
     if args.set_admin_password {
-        auth::set_password(&paths)?;
+        auth::cli::set_password(&paths)?;
     }
     if args.new_api_token {
-        auth::new_token(&paths)?;
+        auth::cli::new_token(&paths)?;
     }
     Ok(())
+}
+
+fn warn_about_admin_auth(state: &AppState) {
+    let admin = state.config().admin;
+    if !admin.auth_required && !admin.listen.ip().is_loopback() {
+        tracing::warn!(
+            listen = %admin.listen,
+            "admin.auth_required is off and the listener is not loopback; \
+             the admin interface accepts every request"
+        );
+    }
+    if admin.auth_required && state.auth.credentials().password_hash.is_none() {
+        tracing::warn!(
+            "no admin password is set; the admin interface is locked until you run bloxy --set-admin-password"
+        );
+    }
 }
 
 fn labelled(service: &'static str, result: Result<()>) -> Result<()> {
