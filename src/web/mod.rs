@@ -4,11 +4,11 @@
 mod api;
 mod auth_api;
 mod guard;
+mod serve;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::extract::State;
 use axum::http::header;
 use axum::middleware;
@@ -25,25 +25,8 @@ const AUTH_JS: &str = include_str!("assets/auth.js");
 const STYLE_CSS: &str = include_str!("assets/style.css");
 
 pub async fn serve(state: Arc<AppState>) -> Result<()> {
-    let listen = state.config().admin.listen;
-    let app = router(state);
-
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("binding admin interface on {listen}"))?;
-
-    tracing::info!(address = %listen, "admin interface listening at http://{listen}");
-
-    // `ConnectInfo` is how the gate reads the client address. Serving with
-    // plain `into_make_service` makes that extractor fail, and every protected
-    // request comes back 500.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .context("serving the admin interface")?;
-    Ok(())
+    let app = router(state.clone());
+    serve::run(state, app).await
 }
 
 /// Assets, the CA certificate, and login stay outside the gate. `route_layer`
@@ -339,5 +322,58 @@ mod tests {
             .unwrap();
         assert_eq!(login.status(), StatusCode::FORBIDDEN);
         assert!(text(login).await.contains("no admin password is set"));
+    }
+
+    #[tokio::test]
+    async fn tls_enabled_marks_the_session_cookie_secure() {
+        let (_dir, app) = router_with(|paths| {
+            crate::auth::cli::store_password(paths, PASSWORD).unwrap();
+            paths.ensure().unwrap();
+            let mut config = Config::default();
+            config.admin.tls_enabled = true;
+            config.save(&paths.config()).unwrap();
+        });
+
+        let state = text(app.clone().oneshot(get("/api/auth/state")).await.unwrap()).await;
+        assert!(state.contains("\"tls\":true"));
+
+        let login = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &format!(r#"{{"password":"{PASSWORD}"}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::NO_CONTENT);
+        let set_cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains("Secure"));
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Strict"));
+
+        let cookie = set_cookie.split(';').next().unwrap();
+        let logout = app
+            .clone()
+            .oneshot(with_header(
+                post_json("/api/auth/logout", ""),
+                header::COOKIE,
+                cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+        let cleared = logout
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cleared.contains("Secure"));
+        assert!(cleared.contains("Max-Age=0"));
     }
 }

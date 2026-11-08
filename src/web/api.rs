@@ -57,8 +57,8 @@ pub(super) async fn get_config(State(state): State<Arc<AppState>>) -> Json<Confi
 #[derive(Debug, Serialize)]
 pub(super) struct ConfigSaved {
     ok: bool,
-    /// Listener addresses are bound at startup, so changing one needs a
-    /// restart before it takes effect.
+    /// Listener addresses and admin TLS are applied at startup, so changing
+    /// either needs a restart before it takes effect.
     restart_required: bool,
 }
 
@@ -67,11 +67,7 @@ pub(super) async fn put_config(
     Json(config): Json<Config>,
 ) -> Result<Json<ConfigSaved>, ApiError> {
     let previous = state.config();
-    let restart_required = previous.proxy.listen != config.proxy.listen
-        || previous.dns.listen != config.dns.listen
-        || previous.admin.listen != config.admin.listen
-        || previous.proxy.enabled != config.proxy.enabled
-        || previous.dns.enabled != config.dns.enabled;
+    let restart_required = restart_required(&previous, &config);
 
     state.set_config(config).await?;
 
@@ -79,6 +75,18 @@ pub(super) async fn put_config(
         ok: true,
         restart_required,
     }))
+}
+
+/// Bound at process start: listen addresses, whether a service is running,
+/// and the admin listener's TLS certificate.
+fn restart_required(previous: &Config, next: &Config) -> bool {
+    previous.proxy.listen != next.proxy.listen
+        || previous.dns.listen != next.dns.listen
+        || previous.admin.listen != next.admin.listen
+        || previous.proxy.enabled != next.proxy.enabled
+        || previous.dns.enabled != next.dns.enabled
+        || previous.admin.tls_enabled != next.admin.tls_enabled
+        || previous.admin.tls_hostname != next.admin.tls_hostname
 }
 
 pub(super) async fn reload(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -207,5 +215,31 @@ impl From<anyhow::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({ "error": self.message }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_changes_need_a_restart_and_auth_required_does_not() {
+        let previous = Config::default();
+
+        let mut enabled = previous.clone();
+        enabled.admin.tls_enabled = true;
+        assert!(restart_required(&previous, &enabled));
+
+        let mut named = previous.clone();
+        named.admin.tls_hostname = Some("admin.example".into());
+        assert!(restart_required(&previous, &named));
+
+        let mut cleared = named.clone();
+        cleared.admin.tls_hostname = None;
+        assert!(restart_required(&named, &cleared));
+
+        let mut auth = previous.clone();
+        auth.admin.auth_required = false;
+        assert!(!restart_required(&previous, &auth));
     }
 }

@@ -13,11 +13,13 @@ bytes = "1"
 
 # HTTP proxy
 hyper = { version = "1", features = ["server", "client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
 http-body-util = "0.1"
 
-# Admin interface
+# Admin interface. `tower` wraps the router so each accepted connection can
+# stamp the client address onto the request.
 axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
 
 # TLS / certificate authority
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -78,7 +80,6 @@ rpassword = "7"
 
 [dev-dependencies]
 tempfile = "3"
-tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 opt-level = 3

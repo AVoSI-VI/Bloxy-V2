@@ -18,7 +18,21 @@ async function checkAuth() {
   $("auth-warning").classList.toggle("hidden", state.auth_required);
   $("login-form").classList.toggle("hidden", needsLogin && !state.password_set);
   $("login-locked").classList.toggle("hidden", !needsLogin || state.password_set);
+  showTlsHint(state);
   return state;
+}
+
+function showTlsHint(state) {
+  const hint = $("tls-hint");
+  if (!state.tls) {
+    hint.textContent = "Takes effect after a restart. The browser must trust the bloxy CA.";
+    return;
+  }
+  const url = `https://${location.host}`;
+  hint.textContent =
+    location.protocol === "https:"
+      ? `Served at ${url}. The browser must trust the bloxy CA. A change takes effect after a restart.`
+      : `Restart bloxy, then open ${url}. The browser must trust the bloxy CA.`;
 }
 
 function wireAuth() {
